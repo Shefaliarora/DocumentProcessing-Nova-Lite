@@ -14,3 +14,18 @@ This use case is a great starting point for:
 
 💡 Built entirely with AWS managed services — no infrastructure to manage, highly scalable, and production-ready.
 
+**Sequence of Steps**
+Document Upload
+PDF or image uploaded to S3 bucket (ai-documentintelligence-nova-demo)
+Trigger Lambda Function
+triggerTextractLambda reads file, calls Amazon Textract
+Text Extraction
+Textract extracts lines, forms, and tables
+Invoke Nova via Bedrock
+parseWithNovaLambda sends text to amazon.nova-lite-v1:0
+Extracts structured fields (invoice_number, amount, dates, etc.)
+Clean & Parse JSON
+Lambda strips markdown formatting and validates JSON
+Store in DynamoDB
+validateAndStoreLambda stores final structured JSON in DocumentData table
+
