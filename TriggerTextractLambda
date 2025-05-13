@@ -1,0 +1,94 @@
+import boto3
+import json
+import time
+
+# Clients
+textract = boto3.client('textract')
+lambda_client = boto3.client('lambda')
+
+# Claude Lambda to call
+TARGET_LAMBDA_NAME = "parseWithClaudeLambda"
+
+def lambda_handler(event, context):
+    try:
+        print("📥 Received event:")
+        print(json.dumps(event))
+
+        record = event['Records'][0]
+        bucket_name = record['s3']['bucket']['name']
+        object_key = record['s3']['object']['key']
+        print(f"📄 Processing file: s3://{bucket_name}/{object_key}")
+
+        if object_key.lower().endswith(('.png', '.jpg', '.jpeg', '.tiff')):
+            # ✅ For images — use synchronous analyze_document
+            response = textract.analyze_document(
+                Document={'S3Object': {'Bucket': bucket_name, 'Name': object_key}},
+                FeatureTypes=['FORMS', 'TABLES']
+            )
+            extracted_text = extract_text_from_blocks(response['Blocks'])
+
+        elif object_key.lower().endswith('.pdf'):
+            # ✅ For PDFs — use asynchronous start_document_analysis
+            start_response = textract.start_document_analysis(
+                DocumentLocation={'S3Object': {'Bucket': bucket_name, 'Name': object_key}},
+                FeatureTypes=['FORMS', 'TABLES']
+            )
+            job_id = start_response['JobId']
+            print(f"⏳ Started async Textract job: {job_id}")
+
+            # Poll for result (basic loop with 20s timeout)
+            max_retries = 10
+            for _ in range(max_retries):
+                status = textract.get_document_analysis(JobId=job_id)
+                if status['JobStatus'] == 'SUCCEEDED':
+                    print("✅ PDF analysis complete.")
+                    extracted_text = extract_text_from_blocks(status['Blocks'])
+                    break
+                elif status['JobStatus'] == 'FAILED':
+                    raise Exception("Textract job failed.")
+                else:
+                    print("⏳ Waiting for Textract job...")
+                    time.sleep(2)
+            else:
+                raise TimeoutError("Textract PDF job timed out.")
+
+        else:
+            raise ValueError("Unsupported file format")
+
+        if not extracted_text.strip():
+            print("❗ No text extracted.")
+            return {"statusCode": 400, "body": "No text found in document."}
+
+        print("📑 Extracted text preview:")
+        print(extracted_text[:500])
+
+        # Send to Claude Lambda
+        downstream_payload = {"text": extracted_text}
+        result = lambda_client.invoke(
+            FunctionName=TARGET_LAMBDA_NAME,
+            InvocationType='RequestResponse',
+            Payload=json.dumps(downstream_payload)
+        )
+
+        response_payload = result['Payload'].read().decode()
+        print("Claude Lambda Response:")
+        print(response_payload)
+
+        return {
+            "statusCode": 200,
+            "body": json.dumps("Textract + Claude pipeline complete.")
+        }
+
+    except Exception as e:
+        print("❌ Error:", str(e))
+        return {
+            "statusCode": 500,
+            "body": json.dumps({'error': str(e)})
+        }
+
+def extract_text_from_blocks(blocks):
+    lines = []
+    for block in blocks:
+        if block['BlockType'] == 'LINE':
+            lines.append(block['Text'])
+    return "\n".join(lines)

@@ -1,0 +1,58 @@
+import boto3
+import json
+import uuid
+from datetime import datetime
+from decimal import Decimal  # ✅ Required for DynamoDB
+
+# Initialize DynamoDB resource
+dynamodb = boto3.resource('dynamodb')
+table = dynamodb.Table('DocumentData')
+
+def validate_data(data):
+    required_keys = ["invoice_number", "vendor_name", "invoice_date", "due_date", "total_amount", "currency"]
+    for key in required_keys:
+        if key not in data or not data[key]:
+            raise ValueError(f"Missing or empty field: {key}")
+    return True
+
+def lambda_handler(event, context):
+    try:
+        # Parse incoming JSON
+        if isinstance(event["body"], str):
+            data = json.loads(event["body"])
+        else:
+            data = event["body"]
+
+        # Validate data
+        validate_data(data)
+
+        # Add metadata
+        data["document_id"] = str(uuid.uuid4())
+        data["document_type"] = "invoice"
+        data["created_at"] = datetime.utcnow().isoformat()
+
+        # Convert numeric fields to Decimal
+        data["total_amount"] = Decimal(str(data["total_amount"]))
+
+        # Optional: Convert unit_price & qty in line items (if exists)
+        if "line_items" in data:
+            for item in data["line_items"]:
+                item["unit_price"] = Decimal(str(item["unit_price"]))
+                item["qty"] = Decimal(str(item["qty"]))
+
+        # Store data in DynamoDB
+        table.put_item(Item=data)
+
+        return {
+            'statusCode': 200,
+            'body': json.dumps({
+                "message": "Data validated and stored successfully.",
+                "document_id": data["document_id"]
+            })
+        }
+
+    except Exception as e:
+        return {
+            'statusCode': 400,
+            'body': json.dumps({"error": str(e)})
+        }

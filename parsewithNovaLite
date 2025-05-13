@@ -1,0 +1,104 @@
+import boto3
+import json
+import uuid
+import re
+from datetime import datetime
+
+# 🔧 Clients
+bedrock = boto3.client("bedrock-runtime", region_name="us-east-1")
+lambda_client = boto3.client("lambda")
+
+# 🔁 Target Lambda for validation/storage
+TARGET_VALIDATOR_LAMBDA = "validateAndStoreLambda"
+
+# ✅ Titan Nova Lite model ID
+MODEL_ID = "amazon.nova-lite-v1:0"
+
+# ✅ Call Amazon Titan Nova Lite via Bedrock
+def call_nova_lite(prompt_text):
+    payload = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "text": f"Extract structured invoice data in JSON format with these keys: invoice_number, vendor_name, invoice_date, due_date, total_amount, currency.\n\nText:\n{prompt_text}"
+                    }
+                ]
+            }
+        ]
+    }
+
+    print("⚙️ Invoking model: amazon.nova-lite-v1:0")
+
+    response = bedrock.invoke_model(
+        modelId="amazon.nova-lite-v1:0",
+        body=json.dumps(payload),
+        contentType="application/json",
+        accept="application/json"
+    )
+
+    response_body = json.loads(response["body"].read())
+    print("🧾 Raw Nova response:", json.dumps(response_body, indent=2))
+
+    # ✅ Extract the LLM's raw response
+    raw_text = response_body["output"]["message"]["content"][0]["text"]
+
+    # ✅ Remove Markdown-style code fences like ```json ... ```
+    cleaned_text = re.sub(r"^```json|```$", "", raw_text.strip(), flags=re.MULTILINE).strip()
+
+    print("🧠 Cleaned JSON text:", cleaned_text)
+
+    # ✅ Now parse it as JSON
+    try:
+        return json.loads(cleaned_text)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Nova returned invalid JSON: {e}\nOutput:\n{cleaned_text}")
+
+
+
+# ✅ Invoke validator Lambda to store in DynamoDB
+def call_validate_lambda(data):
+    response = lambda_client.invoke(
+        FunctionName=TARGET_VALIDATOR_LAMBDA,
+        InvocationType='RequestResponse',
+        Payload=json.dumps({"body": json.dumps(data)})
+    )
+    return json.loads(response['Payload'].read())
+
+# ✅ Main Lambda entry point
+def lambda_handler(event, context):
+    try:
+        print("📥 Event received:", json.dumps(event))
+
+        document_text = event.get("text", "")
+        if not document_text:
+            return {"statusCode": 400, "body": "Missing 'text' in event."}
+
+        # Step 1: Get structured output from Nova Lite
+        structured_data = call_nova_lite(document_text)
+
+        # Step 2: Fill default for invoice_date if missing/null
+        if not structured_data.get("invoice_date"):
+            structured_data["invoice_date"] = datetime.utcnow().strftime("%Y-%m-%d")
+
+        print("🧾 Structured Data:", json.dumps(structured_data))
+
+        # Step 3: Validate and store using another Lambda
+        storage_result = call_validate_lambda(structured_data)
+
+        return {
+            "statusCode": 200,
+            "body": json.dumps({
+                "message": "Nova parsed and data stored.",
+                "nova_output": structured_data,
+                "store_response": storage_result
+            })
+        }
+
+    except Exception as e:
+        print("❌ Error in parseWithNovaLiteLambda:", str(e))
+        return {
+            "statusCode": 500,
+            "body": json.dumps({"error": str(e)})
+        }
